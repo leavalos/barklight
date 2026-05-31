@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0D0D1A">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="48dp">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="HueSync TV"
+            android:textSize="40sp"
+            android:textColor="#E8E8FF"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Sincronizacion de luces Philips Hue"
+            android:textSize="16sp"
+            android:textColor="#6666AA"
+            android:layout_marginBottom="32dp"/>
+
+        <!-- Status -->
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Listo para iniciar"
+            android:textSize="20sp"
+            android:textColor="#64B5F6"
+            android:layout_marginBottom="8dp"/>
+
+        <TextView
+            android:id="@+id/modeText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Modo: inactivo"
+            android:textSize="14sp"
+            android:textColor="#555577"
+            android:layout_marginBottom="40dp"/>
+
+        <!-- Hue Bridge config -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Philips Hue Bridge"
+            android:textSize="18sp"
+            android:textColor="#AAAACC"
+            android:textStyle="bold"
+            android:layout_marginBottom="12dp"/>
+
+        <!-- IP del Bridge -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="140dp"
+                android:layout_height="wrap_content"
+                android:text="IP del Bridge:"
+                android:textColor="#8888AA"
+                android:textSize="15sp"/>
+
+            <EditText
+                android:id="@+id/bridgeIpInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="192.168.1.x"
+                android:inputType="textUri"
+                android:textColor="#E8E8FF"
+                android:textColorHint="#444466"
+                android:backgroundTint="#222244"
+                android:textSize="15sp"/>
+        </LinearLayout>
+
+        <!-- Token (oculto hasta que se vincule) -->
+        <LinearLayout
+            android:id="@+id/tokenRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp"
+            android:gravity="center_vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="140dp"
+                android:layout_height="wrap_content"
+                android:text="Token:"
+                android:textColor="#8888AA"
+                android:textSize="15sp"/>
+
+            <EditText
+                android:id="@+id/tokenInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="Se obtiene automaticamente"
+                android:inputType="textPassword"
+                android:textColor="#E8E8FF"
+                android:textColorHint="#444466"
+                android:backgroundTint="#222244"
+                android:textSize="13sp"/>
+        </LinearLayout>
+
+        <!-- Countdown de pairing -->
+        <TextView
+            android:id="@+id/pairCountdown"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="14sp"
+            android:textColor="#FFB347"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone"/>
+
+        <!-- Botones Bridge -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="40dp">
+
+            <Button
+                android:id="@+id/btnPair"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:text="Vincular Bridge"
+                android:textSize="15sp"
+                android:backgroundTint="#1A237E"
+                android:layout_marginEnd="12dp"
+                android:focusable="true"/>
+
+            <Button
+                android:id="@+id/btnVerify"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:text="Verificar conexion"
+                android:textSize="15sp"
+                android:backgroundTint="#263238"
+                android:focusable="true"/>
+
+        </LinearLayout>
+
+        <!-- Instruccion de pairing -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Para vincular: ingresa la IP, presiona el boton fisico del Bridge y luego Vincular Bridge."
+            android:textSize="13sp"
+            android:textColor="#444466"
+            android:layout_marginBottom="40dp"/>
+
+        <!-- Luces -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Luces y zonas"
+            android:textSize="18sp"
+            android:textColor="#AAAACC"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="ID de luz (ver app Hue) y zona de pantalla que controla"
+            android:textSize="13sp"
+            android:textColor="#555577"
+            android:layout_marginBottom="12dp"/>
+
+        <LinearLayout
+            android:id="@+id/lightsContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="40dp"/>
+
+        <!-- Botones de captura -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Modo de captura"
+            android:textSize="18sp"
+            android:textColor="#AAAACC"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Pantalla: YouTube, apps sin DRM\nUSB: Netflix via Chromecast y capturadora"
+            android:textSize="13sp"
+            android:textColor="#555577"
+            android:layout_marginBottom="20dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnStartScreen"
+                android:layout_width="0dp"
+                android:layout_height="60dp"
+                android:layout_weight="1"
+                android:text="Captura pantalla"
+                android:textSize="15sp"
+                android:backgroundTint="#1565C0"
+                android:layout_marginEnd="12dp"
+                android:focusable="true"/>
+
+            <Button
+                android:id="@+id/btnStartUsb"
+                android:layout_width="0dp"
+                android:layout_height="60dp"
+                android:layout_weight="1"
+                android:text="Captura USB"
+                android:textSize="15sp"
+                android:backgroundTint="#4A148C"
+                android:layout_marginEnd="12dp"
+                android:focusable="true"/>
+
+            <Button
+                android:id="@+id/btnStop"
+                android:layout_width="0dp"
+                android:layout_height="60dp"
+                android:layout_weight="1"
+                android:text="Detener"
+                android:textSize="15sp"
+                android:backgroundTint="#B71C1C"
+                android:enabled="false"
+                android:focusable="true"/>
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

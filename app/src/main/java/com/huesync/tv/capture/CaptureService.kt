@@ -142,6 +142,18 @@ class CaptureService : Service() {
     private fun initProjection(resultCode: Int, data: Intent) {
         val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = pm.getMediaProjection(resultCode, data)
+
+        // Android 14+ requiere registrar un callback ANTES de createVirtualDisplay
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.e(TAG, "MediaProjection detenida por el sistema")
+                    stopCapture()
+                    stopSelf()
+                }
+            }, Handler(Looper.getMainLooper()))
+        }
+
         imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection!!.createVirtualDisplay(
             "HueSyncCapture", screenW, screenH, screenDpi,

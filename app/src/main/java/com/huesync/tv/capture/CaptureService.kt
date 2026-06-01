@@ -132,11 +132,12 @@ class CaptureService : Service() {
             @Suppress("DEPRECATION") wm.defaultDisplay.getMetrics(m)
             screenW = m.widthPixels; screenH = m.heightPixels; screenDpi = m.densityDpi
         }
-        if (screenW > 480) {
-            val s = 480f / screenW
-            screenW = 480; screenH = (screenH * s).toInt()
+        // 240px suficiente para color sampling, ~4x menos CPU que 480px
+        if (screenW > 240) {
+            val s = 240f / screenW
+            screenW = 240; screenH = (screenH * s).toInt()
         }
-        Log.e(TAG, "Resolucion: ${screenW}x${screenH}")
+        Log.e(TAG, "Resolucion captura: ${screenW}x${screenH}")
     }
 
     private fun initProjection(resultCode: Int, data: Intent) {
@@ -166,16 +167,27 @@ class CaptureService : Service() {
     private fun startLoop() {
         running = true
         val cfg = config!!
-        val frameMs = 1000L / cfg.targetFps
         val hueMs   = 1000L / cfg.hueFps
         val lightIds = cfg.lights.map { it.lightId }
 
         captureThread = Thread {
+            // Prioridad baja para no competir con el reproductor de video
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST)
+
             var lastHueSend = 0L
-            Log.e(TAG, "Loop iniciado frameMs=$frameMs hueMs=$hueMs")
+            Log.e(TAG, "Loop iniciado hueMs=$hueMs")
 
             while (running) {
-                val t0 = SystemClock.elapsedRealtime()
+                val now = SystemClock.elapsedRealtime()
+
+                // Solo procesar si ya es hora de enviar a Hue — no desperdiciar CPU en otros frames
+                if (now - lastHueSend < hueMs) {
+                    // Descartar frames intermedios sin procesarlos
+                    imageReader?.acquireLatestImage()?.close()
+                    Thread.sleep(4)
+                    continue
+                }
+
                 val image = imageReader?.acquireLatestImage()
                 if (image != null) {
                     try {
@@ -212,21 +224,19 @@ class CaptureService : Service() {
                             }
                         }
 
-                        val now = SystemClock.elapsedRealtime()
-                        if (!inDrmMode && now - lastHueSend >= hueMs) {
+                        if (!inDrmMode) {
                             val colors = analyzer!!.analyze(frame)
-                            Log.d(TAG, "Enviando colores a ${colors.size} luces")
                             bridge?.setLights(colors)
-                            lastHueSend = now
+                            lastHueSend = SystemClock.elapsedRealtime()
                         }
                         frame.recycle()
                     } catch (e: Exception) {
                         Log.e(TAG, "Error procesando frame: ${e.message}")
                         image.close()
                     }
+                } else {
+                    Thread.sleep(4)
                 }
-                val sleep = frameMs - (SystemClock.elapsedRealtime() - t0)
-                if (sleep > 0) Thread.sleep(sleep)
             }
             Log.e(TAG, "Loop terminado")
         }.also { it.name = "HueSyncLoop"; it.start() }

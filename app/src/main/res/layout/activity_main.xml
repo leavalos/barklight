@@ -57,7 +57,41 @@
             android:textStyle="bold"
             android:layout_marginBottom="12dp"/>
 
-        <!-- IP del Bridge -->
+        <!-- IP del Bridge — Spinner con bridges descubiertos -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="140dp"
+                android:layout_height="wrap_content"
+                android:text="IP del Bridge:"
+                android:textColor="#8888AA"
+                android:textSize="15sp"/>
+
+            <Spinner
+                android:id="@+id/bridgeIpSpinner"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:backgroundTint="#222244"
+                android:popupBackground="#1A1A2E"/>
+
+            <Button
+                android:id="@+id/btnScanBridges"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:text="Buscar"
+                android:textSize="13sp"
+                android:backgroundTint="#263238"
+                android:layout_marginStart="8dp"
+                android:focusable="true"/>
+        </LinearLayout>
+
+        <!-- IP manual (fallback) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -68,21 +102,21 @@
             <TextView
                 android:layout_width="140dp"
                 android:layout_height="wrap_content"
-                android:text="IP del Bridge:"
-                android:textColor="#8888AA"
-                android:textSize="15sp"/>
+                android:text="IP manual:"
+                android:textColor="#555577"
+                android:textSize="13sp"/>
 
             <EditText
                 android:id="@+id/bridgeIpInput"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:hint="192.168.1.x"
+                android:hint="192.168.1.x  (opcional)"
                 android:inputType="textUri"
                 android:textColor="#E8E8FF"
-                android:textColorHint="#444466"
+                android:textColorHint="#333355"
                 android:backgroundTint="#222244"
-                android:textSize="15sp"/>
+                android:textSize="13sp"/>
         </LinearLayout>
 
         <!-- Token (oculto hasta que se vincule) -->

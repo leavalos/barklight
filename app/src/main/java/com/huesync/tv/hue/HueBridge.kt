@@ -123,6 +123,86 @@ class HueBridge(
             }.also { it.name = "HueGroups" }.start()
         }
 
+        /**
+         * Descubre bridges Hue en la red.
+         * 1. Intenta discovery.meethue.com (API oficial, rápido)
+         * 2. Si falla, escanea la subred local buscando el puerto 80 con /api/config
+         *
+         * Devuelve lista de IPs encontradas.
+         */
+        fun discoverBridges(onResult: (List<String>, String?) -> Unit) {
+            Thread {
+                val found = mutableListOf<String>()
+
+                // Paso 1: API oficial de Meethue
+                try {
+                    val response = httpGet("https://discovery.meethue.com/")
+                    val arr = org.json.JSONArray(response)
+                    for (i in 0 until arr.length()) {
+                        val ip = arr.getJSONObject(i).optString("internalipaddress")
+                        if (ip.isNotEmpty()) found.add(ip)
+                    }
+                    Log.i(TAG, "Discovery meethue: $found")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Discovery meethue falló: ${e.message}")
+                }
+
+                // Paso 2: Scan local si no encontramos nada vía cloud
+                if (found.isEmpty()) {
+                    Log.i(TAG, "Iniciando scan local...")
+                    try {
+                        val localIp = java.net.NetworkInterface.getNetworkInterfaces()
+                            ?.toList()
+                            ?.flatMap { it.inetAddresses.toList() }
+                            ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                            ?.hostAddress ?: ""
+
+                        if (localIp.isNotEmpty()) {
+                            val subnet = localIp.substringBeforeLast(".")
+                            Log.i(TAG, "Escaneando subred $subnet.x ...")
+                            val threads = mutableListOf<Thread>()
+                            val lock = Object()
+                            // Escanear .1-.254 en paralelo con 30 threads
+                            for (i in 1..254) {
+                                val ip = "$subnet.$i"
+                                val t = Thread {
+                                    try {
+                                        val url = java.net.URL("http://$ip/api/config")
+                                        val conn = url.openConnection() as java.net.HttpURLConnection
+                                        conn.connectTimeout = 300
+                                        conn.readTimeout = 300
+                                        val body = conn.inputStream.bufferedReader().readText()
+                                        conn.disconnect()
+                                        // Los bridges Hue responden con "bridgeid" en /api/config
+                                        if (body.contains("bridgeid", ignoreCase = true)) {
+                                            synchronized(lock) { found.add(ip) }
+                                            Log.i(TAG, "Bridge encontrado en $ip")
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+                                threads.add(t)
+                                t.start()
+                                // Max 30 threads simultáneos
+                                if (threads.size >= 30) {
+                                    threads.removeAll { !it.isAlive }
+                                    if (threads.size >= 30) threads.first().join()
+                                }
+                            }
+                            threads.forEach { it.join() }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error en scan local: ${e.message}")
+                    }
+                }
+
+                if (found.isEmpty()) {
+                    onResult(emptyList(), "No se encontraron bridges. Verifica que estés en la misma red.")
+                } else {
+                    onResult(found.distinct(), null)
+                }
+            }.also { it.name = "HueDiscovery" }.start()
+        }
+
         private fun httpGet(url: String): String {
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.connectTimeout = TIMEOUT_MS

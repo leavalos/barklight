@@ -39,6 +39,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lightsContainer: LinearLayout
     private lateinit var pairCountdown: TextView
 
+    private lateinit var bridgeIpSpinner: Spinner
+    private lateinit var btnScanBridges: Button
+    private var discoveredBridges = mutableListOf<String>()
+
     private var config = Config()
     private var countdownTimer: CountDownTimer? = null
 
@@ -57,17 +61,27 @@ class MainActivity : AppCompatActivity() {
         btnStop         = findViewById(R.id.btnStop)
         btnVerify       = findViewById(R.id.btnVerify)
         lightsContainer = findViewById(R.id.lightsContainer)
-        pairCountdown   = findViewById(R.id.pairCountdown)
+        pairCountdown     = findViewById(R.id.pairCountdown)
+        bridgeIpSpinner   = findViewById(R.id.bridgeIpSpinner)
+        btnScanBridges    = findViewById(R.id.btnScanBridges)
 
         config = Config.load(this)
         bridgeIpInput.setText(config.bridgeIp)
         tokenInput.setText(config.bridgeToken)
+        // Pre-cargar la IP guardada en el spinner
+        if (config.bridgeIp.isNotEmpty()) {
+            discoveredBridges = mutableListOf(config.bridgeIp)
+            updateSpinner()
+        } else {
+            updateSpinner()
+        }
 
         // Mostrar token solo si ya hay uno guardado
         tokenRow.visibility = if (config.bridgeToken.isNotEmpty()) View.VISIBLE else View.GONE
 
         renderLights()
 
+        btnScanBridges.setOnClickListener { scanBridges() }
         btnPair.setOnClickListener        { startPairing() }
         btnVerify.setOnClickListener      { verifyBridge() }
         btnStartScreen.setOnClickListener { startScreenCapture() }
@@ -82,12 +96,63 @@ class MainActivity : AppCompatActivity() {
         updateUI()
     }
 
+    // ── DISCOVERY DE BRIDGES ─────────────────────────────────────────────────
+
+    /** Devuelve la IP seleccionada: spinner si hay bridges, input manual si no */
+    private fun selectedIp(): String {
+        val spinnerIp = discoveredBridges.getOrNull(bridgeIpSpinner.selectedItemPosition) ?: ""
+        val manualIp  = bridgeIpInput.text.toString().trim()
+        return spinnerIp.ifEmpty { manualIp }
+    }
+
+    private fun scanBridges() {
+        setStatus("Buscando bridges en la red...")
+        btnScanBridges.isEnabled = false
+        HueBridge.discoverBridges { bridges, error ->
+            runOnUiThread {
+                btnScanBridges.isEnabled = true
+                if (bridges.isNotEmpty()) {
+                    discoveredBridges.clear()
+                    discoveredBridges.addAll(bridges)
+                    updateSpinner()
+                    // Auto-guardar la primera IP encontrada
+                    config = config.copy(bridgeIp = bridges.first())
+                    Config.save(this, config)
+                    setStatus("${bridges.size} bridge(s) encontrado(s). Seleccioná uno y vinculá.")
+                } else {
+                    setStatus(error ?: "No se encontraron bridges")
+                }
+            }
+        }
+    }
+
+    private fun updateSpinner() {
+        val items = if (discoveredBridges.isEmpty()) listOf("Sin bridges — ingresá IP manualmente")
+                    else discoveredBridges.toList()
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, items)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        bridgeIpSpinner.adapter = adapter
+        // Seleccionar la IP guardada si está en la lista
+        val savedIdx = discoveredBridges.indexOf(config.bridgeIp)
+        if (savedIdx >= 0) bridgeIpSpinner.setSelection(savedIdx)
+        // Actualizar bridgeIpInput al cambiar selección
+        bridgeIpSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: android.widget.AdapterView<*>?, v: android.view.View?, pos: Int, id: Long) {
+                val ip = discoveredBridges.getOrNull(pos) ?: return
+                bridgeIpInput.setText(ip)
+                config = config.copy(bridgeIp = ip)
+                Config.save(this@MainActivity, config)
+            }
+            override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
+        }
+    }
+
     // ── PAIRING AUTOMÁTICO ────────────────────────────────────────────────────
 
     private fun startPairing() {
-        val ip = bridgeIpInput.text.toString().trim()
+        val ip = selectedIp()
         if (ip.isEmpty()) {
-            setStatus("Ingresa la IP del Bridge primero")
+            setStatus("Selecciona o ingresa la IP del Bridge primero")
             return
         }
 

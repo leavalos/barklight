@@ -125,7 +125,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun tryGetToken(ip: String) {
         if (tokenObtained) return
-        HueBridge.requestToken(ip) { token, error ->
+        HueBridge.requestToken(ip) { token, clientKey, error ->
             runOnUiThread {
                 if (token != null && !tokenObtained) {
                     tokenObtained = true
@@ -133,22 +133,27 @@ class MainActivity : AppCompatActivity() {
                     pairCountdown.visibility = View.GONE
                     btnPair.isEnabled = true
 
-                    // Guardar token y mostrarlo
-                    config = config.copy(bridgeToken = token)
+                    // Guardar token + clientKey
+                    config = config.copy(
+                        bridgeToken = token,
+                        clientKey   = clientKey ?: ""
+                    )
                     Config.save(this, config)
                     tokenInput.setText(token)
                     tokenRow.visibility = View.VISIBLE
 
-                    setStatus("Conectado al Bridge correctamente")
-                    verifyBridge()  // verificar automáticamente
-                } else if (error != null && error != "Presiona el botón del Bridge primero") {
-                    // Error real (no es "aún no presionaste el botón")
+                    val hasKey = !clientKey.isNullOrEmpty()
+                    setStatus(
+                        if (hasKey) "Conectado al Bridge ✓ (Entertainment API disponible)"
+                        else        "Conectado al Bridge (sin clientKey — solo HTTP)"
+                    )
+                    verifyBridge()
+                } else if (error != null && error != "Presiona el boton del Bridge primero") {
                     countdownTimer?.cancel()
                     pairCountdown.visibility = View.GONE
                     btnPair.isEnabled = true
                     setStatus("Error: $error")
                 }
-                // Si el error es "presiona el botón" seguimos esperando
             }
         }
     }
@@ -166,8 +171,35 @@ class MainActivity : AppCompatActivity() {
         setStatus("Verificando Bridge...")
         HueBridge(ip, token).verifyConnection { ok, lights ->
             runOnUiThread {
-                if (ok) setStatus("Bridge OK  Luces disponibles: ${lights.joinToString(", ")}")
-                else    setStatus("No se pudo conectar al Bridge")
+                if (ok) {
+                    setStatus("Bridge OK — Luces disponibles: ${lights.joinToString(", ")}")
+                    // Cargar grupos de entretenimiento
+                    loadEntertainmentGroups(ip, token)
+                } else {
+                    setStatus("No se pudo conectar al Bridge")
+                }
+            }
+        }
+    }
+
+    private fun loadEntertainmentGroups(ip: String, token: String) {
+        HueBridge.getEntertainmentGroups(ip, token) { groups, error ->
+            runOnUiThread {
+                if (error != null) {
+                    Log.w(TAG, "Error cargando grupos: $error")
+                    return@runOnUiThread
+                }
+                if (groups.isEmpty()) {
+                    setStatus("Bridge OK — Sin grupos Entertainment. Crea uno en la app Hue.")
+                    return@runOnUiThread
+                }
+                // Si no hay grupo configurado, usar el primero
+                if (config.entertainmentGroupId.isEmpty()) {
+                    config = config.copy(entertainmentGroupId = groups.first().first)
+                    Config.save(this, config)
+                }
+                val groupNames = groups.joinToString(", ") { "${it.second} (id ${it.first})" }
+                setStatus("Bridge OK — Grupo Entertainment: $groupNames")
             }
         }
     }

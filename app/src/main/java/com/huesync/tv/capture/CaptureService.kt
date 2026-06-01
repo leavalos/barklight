@@ -76,7 +76,12 @@ class CaptureService : Service() {
         try {
             config   = Config.load(this)
             analyzer = ColorAnalyzer(config!!)
-            bridge   = HueBridge(config!!.bridgeIp, config!!.bridgeToken)
+            bridge   = HueBridge(
+                ip                   = config!!.bridgeIp,
+                token                = config!!.bridgeToken,
+                clientKey            = config!!.clientKey,
+                entertainmentGroupId = config!!.entertainmentGroupId
+            )
 
             val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
             @Suppress("DEPRECATION")
@@ -95,9 +100,17 @@ class CaptureService : Service() {
             }
 
             isRunning = true
-            updateNotif("Capturando pantalla...")
+            updateNotif("Conectando Entertainment API...")
             initScreen()
             initProjection(resultCode, resultData)
+
+            // Iniciar Entertainment API (DTLS/UDP) si está configurada
+            bridge!!.startEntertainment { ok ->
+                runOnMainThread {
+                    if (ok) updateNotif("Sincronizando (Entertainment API)")
+                    else    updateNotif("Capturando pantalla (HTTP)")
+                }
+            }
             startLoop()
             Log.e(TAG, "Loop de captura iniciado")
         } catch (e: Exception) {
@@ -223,6 +236,10 @@ class CaptureService : Service() {
             }
         }
         return samples > 0 && (total / samples / 3) < 8
+    }
+
+    private fun runOnMainThread(action: () -> Unit) {
+        android.os.Handler(mainLooper).post(action)
     }
 
     private fun stopCapture() {

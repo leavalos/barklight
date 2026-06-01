@@ -24,4 +24,7 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.leanback:leanback:1.0.0'
     implementation 'com.google.android.material:material:1.11.0'
+    // BouncyCastle para DTLS 1.2 con PSK (requerido por Hue Entertainment API)
+    implementation 'org.bouncycastle:bcprov-jdk15to18:1.78.1'
+    implementation 'org.bouncycastle:bctls-jdk15to18:1.78.1'
 }

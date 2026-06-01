@@ -15,7 +15,7 @@ data class Config(
     val entertainmentGroupId: String = "",
     val captureMode: CaptureMode = CaptureMode.SCREEN,
     val targetFps: Int = 24,
-    val hueFps: Int = 25,   // Entertainment API soporta hasta 25 fps
+    val hueFps: Int = 8,    // 8fps suficiente para Hue, evita competir con decoder de video
     val smoothing: Float = 0.25f,
     val borderPct: Float = 0.12f,
     val satBoost: Float = 1.4f,
@@ -50,7 +50,7 @@ data class Config(
                 entertainmentGroupId = p.getString("entertainment_group_id", "") ?: "",
                 captureMode          = CaptureMode.valueOf(p.getString("capture_mode", CaptureMode.SCREEN.name) ?: CaptureMode.SCREEN.name),
                 targetFps            = p.getInt("target_fps", 24),
-                hueFps               = p.getInt("hue_fps", 25),
+                hueFps               = p.getInt("hue_fps", 8),
                 smoothing            = p.getFloat("smoothing", 0.25f),
                 borderPct            = p.getFloat("border_pct", 0.12f),
                 satBoost             = p.getFloat("sat_boost", 1.4f),

@@ -155,7 +155,7 @@ class CaptureService : Service() {
             }, Handler(Looper.getMainLooper()))
         }
 
-        imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
+        imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 1)
         virtualDisplay = mediaProjection!!.createVirtualDisplay(
             "HueSyncCapture", screenW, screenH, screenDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -184,7 +184,7 @@ class CaptureService : Service() {
                 if (now - lastHueSend < hueMs) {
                     // Descartar frames intermedios sin procesarlos
                     imageReader?.acquireLatestImage()?.close()
-                    Thread.sleep(4)
+                    Thread.sleep(16) // ~60fps max, dejamos aire al decoder
                     continue
                 }
 
@@ -235,7 +235,7 @@ class CaptureService : Service() {
                         image.close()
                     }
                 } else {
-                    Thread.sleep(4)
+                    Thread.sleep(16)
                 }
             }
             Log.e(TAG, "Loop terminado")

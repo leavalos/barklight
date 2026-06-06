@@ -132,10 +132,10 @@ class CaptureService : Service() {
             @Suppress("DEPRECATION") wm.defaultDisplay.getMetrics(m)
             screenW = m.widthPixels; screenH = m.heightPixels; screenDpi = m.densityDpi
         }
-        // 240px suficiente para color sampling, ~4x menos CPU que 480px
-        if (screenW > 240) {
-            val s = 240f / screenW
-            screenW = 240; screenH = (screenH * s).toInt()
+        // 120px suficiente con muestreo directo por zona, mínima carga al decoder
+        if (screenW > 120) {
+            val s = 120f / screenW
+            screenW = 120; screenH = (screenH * s).toInt()
         }
         Log.e(TAG, "Resolucion captura: ${screenW}x${screenH}")
     }

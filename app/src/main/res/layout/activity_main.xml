@@ -237,7 +237,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Pantalla: YouTube, apps sin DRM\nUSB: Netflix via Chromecast y capturadora"
+            android:text="Requiere barklight-server corriendo en el TV via ADB shell.\nVer server/README.md para iniciarlo (script start-server.sh)."
             android:textSize="13sp"
             android:textColor="#555577"
             android:layout_marginBottom="20dp"/>
@@ -252,7 +252,7 @@
                 android:layout_width="0dp"
                 android:layout_height="60dp"
                 android:layout_weight="1"
-                android:text="Captura pantalla"
+                android:text="Iniciar sync"
                 android:textSize="15sp"
                 android:backgroundTint="#1565C0"
                 android:layout_marginEnd="12dp"

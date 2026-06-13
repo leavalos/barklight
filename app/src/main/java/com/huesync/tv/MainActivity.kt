@@ -1,9 +1,6 @@
 package com.huesync.tv
 
-import android.app.Activity
-import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.os.CountDownTimer
 import android.util.Log
@@ -23,7 +20,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val REQ_PROJECTION = 1001
     }
 
     private lateinit var statusText: TextView
@@ -271,36 +267,22 @@ class MainActivity : AppCompatActivity() {
 
     // ── CAPTURA ───────────────────────────────────────────────────────────────
 
+    /**
+     * Inicia la captura SIN MediaProjection.
+     * Requiere que barklight-server.jar este corriendo via ADB shell
+     * (ver instrucciones en README / pantalla de la app).
+     */
     private fun startScreenCapture() {
         saveConfig(CaptureMode.SCREEN)
-        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        startActivityForResult(pm.createScreenCaptureIntent(), REQ_PROJECTION)
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        Log.e(TAG, "onActivityResult: req=$requestCode result=$resultCode data=$data")
-        if (requestCode == REQ_PROJECTION) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                Log.e(TAG, "Permiso concedido — iniciando CaptureService")
-                try {
-                    val intent = Intent(this, CaptureService::class.java).apply {
-                        putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode)
-                        putExtra(CaptureService.EXTRA_RESULT_DATA, data)
-                    }
-                    startForegroundService(intent)
-                    Log.e(TAG, "startForegroundService OK")
-                    setStatus("Capturando pantalla")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error iniciando servicio: ${e.message}", e)
-                    setStatus("Error: ${e.message}")
-                }
-            } else {
-                Log.e(TAG, "Permiso denegado resultCode=$resultCode")
-                setStatus("Permiso de captura denegado")
-            }
-            updateUI()
+        try {
+            val intent = Intent(this, CaptureService::class.java)
+            startForegroundService(intent)
+            setStatus("Iniciando — conectando a barklight-server...")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error iniciando servicio: ${e.message}", e)
+            setStatus("Error: ${e.message}")
         }
+        updateUI()
     }
 
     private fun startUsbCapture() {

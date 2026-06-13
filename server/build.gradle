@@ -1,0 +1,36 @@
+// build.gradle — BarkLight Server JAR
+// Compila un JAR ejecutable via app_process en Android
+
+plugins {
+    id 'java'
+}
+
+// Android SDK stubs — necesarios para compilar contra APIs de Android
+// sin tener el SDK completo
+dependencies {
+    compileOnly fileTree(dir: 'android-stubs', include: ['*.jar'])
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+jar {
+    archiveFileName = 'barklight-server.jar'
+    manifest {
+        attributes 'Main-Class': 'com.barklight.server.BarkLightServer'
+    }
+}
+
+// Task para crear stubs mínimos del SDK de Android
+task downloadAndroidStubs {
+    doLast {
+        def stubsDir = new File('android-stubs')
+        if (!stubsDir.exists()) {
+            stubsDir.mkdirs()
+            println "Coloca android.jar del SDK en android-stubs/"
+            println "Ubicación típica: \$ANDROID_SDK/platforms/android-34/android.jar"
+        }
+    }
+}

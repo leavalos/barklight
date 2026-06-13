@@ -4,74 +4,75 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
-import android.graphics.PixelFormat
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
-import android.media.ImageReader
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
+import android.graphics.BitmapFactory
 import android.os.*
-import android.util.DisplayMetrics
 import android.util.Log
-import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.huesync.tv.MainActivity
 import com.huesync.tv.R
 import com.huesync.tv.analyzer.ColorAnalyzer
 import com.huesync.tv.hue.HueBridge
 import com.huesync.tv.model.Config
+import java.io.DataInputStream
+import java.io.IOException
+import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
+/**
+ * CaptureService v2 — sin MediaProjection, sin VirtualDisplay.
+ *
+ * Conecta al BarkLight Server JAR que corre en el TV via ADB shell.
+ * El servidor usa SurfaceControl (accesible desde shell uid) para leer
+ * el framebuffer directamente sin crear un VirtualDisplay.
+ *
+ * Resultado: el decoder de video NO tiene competencia en la GPU.
+ *
+ * Setup requerido (una sola vez desde PC/Pi):
+ *   adb push barklight-server.jar /data/local/tmp/
+ *   adb shell CLASSPATH=/data/local/tmp/barklight-server.jar \
+ *             app_process / com.barklight.server.BarkLightServer &
+ *
+ * El servidor escucha en localhost:7070.
+ * Esta app conecta y pide frames bajo demanda.
+ */
 class CaptureService : Service() {
 
     companion object {
         private const val TAG = "CaptureService"
         const val CHANNEL_ID  = "huesync_channel"
         const val NOTIF_ID    = 1
-        const val EXTRA_RESULT_CODE = "result_code"
-        const val EXTRA_RESULT_DATA = "result_data"
         const val ACTION_STOP = "com.huesync.tv.STOP"
+        // Puerto del servidor JAR corriendo en el mismo TV
+        private const val SERVER_PORT = 7070
+        private const val SERVER_HOST = "127.0.0.1"
         var isRunning = false
             private set
     }
 
-    private var mediaProjection: MediaProjection? = null
-    private var virtualDisplay: VirtualDisplay? = null
-    private var imageReader: ImageReader? = null
     private var config: Config? = null
     private var analyzer: ColorAnalyzer? = null
     private var bridge: HueBridge? = null
-    private var screenW = 0
-    private var screenH = 0
-    private var screenDpi = 0
+    private var running = false
     private var blackFrameCount = 0
     private var inDrmMode = false
-    private var running = false
 
-    // Scheduler de baja prioridad — dispara la captura N veces por segundo
+    private var serverSocket: Socket? = null
+    private var serverInput: DataInputStream? = null
+
     private val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
-        Thread(r, "HueSyncScheduler").also {
-            it.priority = Thread.MIN_PRIORITY  // mínima prioridad del sistema
-        }
+        Thread(r, "BarkLightScheduler").also { it.priority = Thread.MIN_PRIORITY }
     }
     private var scheduledTask: ScheduledFuture<*>? = null
-
-    // Flag para evitar capturas superpuestas
     @Volatile private var capturing = false
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, buildNotif("HueSync TV activo"),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(NOTIF_ID, buildNotif("HueSync TV activo"))
-        }
-        Log.d(TAG, "onCreate")
+        // No necesitamos FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION — ya no grabamos pantalla
+        startForeground(NOTIF_ID, buildNotif("BarkLight iniciando..."))
+        Log.d(TAG, "onCreate — modo sin MediaProjection")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -89,21 +90,8 @@ class CaptureService : Service() {
                 entertainmentGroupId = config!!.entertainmentGroupId
             )
 
-            val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
-            @Suppress("DEPRECATION")
-            val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-            else
-                intent?.getParcelableExtra(EXTRA_RESULT_DATA)
-
-            if (resultCode == 0 || resultData == null) {
-                Log.e(TAG, "Sin datos de proyeccion"); stopSelf(); return START_NOT_STICKY
-            }
-
             isRunning = true
             running   = true
-            initScreen()
-            initProjection(resultCode, resultData)
 
             bridge!!.startEntertainment { ok ->
                 Handler(Looper.getMainLooper()).post {
@@ -111,8 +99,11 @@ class CaptureService : Service() {
                 }
             }
 
-            startScheduler()
-            Log.d(TAG, "Servicio iniciado a ${config!!.hueFps}fps")
+            // Conectar al servidor JAR en background
+            Thread { connectToServer() }.also {
+                it.name = "BarkLightConnect"; it.start()
+            }
+
         } catch (e: Exception) {
             Log.e(TAG, "Error iniciando: ${e.message}", e)
             stopSelf()
@@ -120,114 +111,86 @@ class CaptureService : Service() {
         return START_STICKY
     }
 
-    private fun initScreen() {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val b = wm.currentWindowMetrics.bounds
-            screenW = b.width(); screenH = b.height()
-            screenDpi = resources.displayMetrics.densityDpi
-        } else {
-            val m = DisplayMetrics()
-            @Suppress("DEPRECATION") wm.defaultDisplay.getMetrics(m)
-            screenW = m.widthPixels; screenH = m.heightPixels; screenDpi = m.densityDpi
+    // ── CONEXIÓN AL SERVIDOR JAR ──────────────────────────────────────────────
+
+    private fun connectToServer() {
+        var retries = 0
+        while (running) {
+            try {
+                Log.d(TAG, "Conectando al servidor BarkLight en $SERVER_HOST:$SERVER_PORT")
+                updateNotif("Conectando al servidor...")
+
+                val socket = Socket(SERVER_HOST, SERVER_PORT)
+                serverSocket = socket
+                serverInput  = DataInputStream(socket.getInputStream())
+
+                Log.d(TAG, "Conectado al servidor — iniciando captura")
+                updateNotif("Capturando sin grabar pantalla")
+                retries = 0
+
+                startScheduler()
+
+                // Bloquear hasta que se pierda la conexión
+                while (running && !socket.isClosed) {
+                    Thread.sleep(1000)
+                }
+
+                scheduledTask?.cancel(true)
+
+            } catch (e: Exception) {
+                if (!running) break
+                retries++
+                val waitSec = minOf(retries * 2L, 10L)
+                Log.w(TAG, "Sin servidor ($e). Reintentando en ${waitSec}s...")
+                updateNotif("Servidor no disponible. Reintentando...")
+                updateNotif("Correr: adb shell CLASSPATH=/data/local/tmp/barklight-server.jar app_process / com.barklight.server.BarkLightServer")
+                Thread.sleep(waitSec * 1000)
+            }
         }
-        if (screenW > 120) {
-            val s = 120f / screenW
-            screenW = 120; screenH = (screenH * s).toInt()
-        }
-        Log.d(TAG, "Resolucion captura: ${screenW}x${screenH}")
     }
 
-    private fun initProjection(resultCode: Int, data: Intent) {
-        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = pm.getMediaProjection(resultCode, data)
+    // ── SCHEDULER DE CAPTURA ─────────────────────────────────────────────────
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() { stopCapture(); stopSelf() }
-            }, Handler(Looper.getMainLooper()))
-        }
-
-        // maxImages=1: solo un frame en memoria a la vez
-        // No conectamos al VirtualDisplay todavía — lo haremos on-demand
-        imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 1)
-
-        // CLAVE: FLAG_AUTO_MIRROR pero SIN surface activa al inicio
-        // El VirtualDisplay existe pero no renderiza nada hasta que conectemos la surface
-        virtualDisplay = mediaProjection!!.createVirtualDisplay(
-            "BarkLightCapture", screenW, screenH, screenDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            null,  // surface null = VirtualDisplay inactivo, NO consume GPU
-            null, null
-        )
-        Log.d(TAG, "VirtualDisplay creado (inactivo)")
-    }
-
-    /**
-     * Scheduler de captura on-demand.
-     *
-     * En vez de tener el VirtualDisplay renderizando continuamente,
-     * lo activamos solo el tiempo necesario para capturar un frame,
-     * luego lo desactivamos inmediatamente.
-     *
-     * Esto libera la GPU entre capturas, permitiendo que el decoder
-     * de video funcione sin competencia.
-     */
     private fun startScheduler() {
         val intervalMs = 1000L / (config?.hueFps ?: 8)
-
         scheduledTask = scheduler.scheduleAtFixedRate({
             if (!running || capturing) return@scheduleAtFixedRate
-
             capturing = true
-            try {
-                captureOnce()
-            } finally {
-                capturing = false
-            }
-        }, 500, intervalMs, TimeUnit.MILLISECONDS)
+            try { requestFrame() }
+            finally { capturing = false }
+        }, 0, intervalMs, TimeUnit.MILLISECONDS)
     }
 
-    private fun captureOnce() {
-        val reader = imageReader ?: return
-        val vd     = virtualDisplay ?: return
-
-        // 1. Conectar surface al VirtualDisplay — Android empieza a renderizar
-        vd.surface = reader.surface
-
-        // 2. Pequeño sleep para dar tiempo a que llegue el primer frame
-        //    125ms es el tiempo de un frame a 8fps — suficiente
-        Thread.sleep(80)
-
-        // 3. Leer el frame disponible
-        val image = reader.acquireLatestImage()
-
-        // 4. INMEDIATAMENTE desconectar — el VirtualDisplay deja de renderizar
-        vd.surface = null
-
-        if (image == null) return
+    private fun requestFrame() {
+        val socket = serverSocket ?: return
+        if (socket.isClosed) return
 
         try {
-            val plane  = image.planes[0]
-            val rowPad = plane.rowStride - plane.pixelStride * screenW
-            val bmp = Bitmap.createBitmap(
-                screenW + rowPad / plane.pixelStride,
-                screenH, Bitmap.Config.ARGB_8888)
-            bmp.copyPixelsFromBuffer(plane.buffer)
-            image.close()
+            // Pedir frame al servidor
+            socket.getOutputStream().write(1)
+            socket.getOutputStream().flush()
 
-            val frame = if (rowPad > 0)
-                Bitmap.createBitmap(bmp, 0, 0, screenW, screenH).also { bmp.recycle() }
-            else bmp
+            // Leer respuesta: [4 bytes tamaño][JPEG]
+            val size = serverInput?.readInt() ?: return
+            if (size <= 0) return
 
-            processFrame(frame)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error procesando frame: ${e.message}")
-            try { image.close() } catch (_: Exception) {}
+            val jpegBytes = ByteArray(size)
+            serverInput?.readFully(jpegBytes) ?: return
+
+            // Decodificar y procesar
+            val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, size) ?: return
+            processFrame(bmp)
+
+        } catch (e: IOException) {
+            Log.w(TAG, "Error leyendo frame: ${e.message}")
+            try { serverSocket?.close() } catch (_: Exception) {}
+            serverSocket = null
         }
     }
 
-    private fun processFrame(frame: Bitmap) {
+    // ── PROCESAMIENTO DE COLOR ────────────────────────────────────────────────
+
+    private fun processFrame(frame: android.graphics.Bitmap) {
         val lightIds = config?.lights?.map { it.lightId } ?: return
 
         val isBlack = isFrameBlack(frame)
@@ -236,9 +199,7 @@ class CaptureService : Service() {
             if (blackFrameCount >= 30 && !inDrmMode) {
                 inDrmMode = true
                 bridge?.setDrmMode(true, lightIds)
-                Handler(Looper.getMainLooper()).post {
-                    updateNotif("Contenido DRM - luz calida")
-                }
+                Handler(Looper.getMainLooper()).post { updateNotif("Contenido DRM - luz calida") }
             }
         } else {
             if (inDrmMode) {
@@ -246,9 +207,7 @@ class CaptureService : Service() {
                 if (blackFrameCount == 0) {
                     inDrmMode = false
                     bridge?.setDrmMode(false, lightIds)
-                    Handler(Looper.getMainLooper()).post {
-                        updateNotif("Sincronizando pantalla")
-                    }
+                    Handler(Looper.getMainLooper()).post { updateNotif("Sincronizando pantalla") }
                 }
             } else {
                 blackFrameCount = 0
@@ -262,7 +221,7 @@ class CaptureService : Service() {
         frame.recycle()
     }
 
-    private fun isFrameBlack(bmp: Bitmap): Boolean {
+    private fun isFrameBlack(bmp: android.graphics.Bitmap): Boolean {
         val cx = bmp.width / 2; val cy = bmp.height / 2
         val sr = minOf(bmp.width, bmp.height) / 4
         if (sr < 5) return false
@@ -280,21 +239,18 @@ class CaptureService : Service() {
         return samples > 0 && (total / samples / 3) < 8
     }
 
+    // ── LIFECYCLE ─────────────────────────────────────────────────────────────
+
     private fun stopCapture() {
         running = false; isRunning = false
         scheduledTask?.cancel(true)
         scheduler.shutdown()
-        // Desconectar surface antes de liberar
-        virtualDisplay?.surface = null
+        try { serverSocket?.close() } catch (_: Exception) {}
         val cfg = config; val br = bridge
         if (cfg != null && br != null) {
             br.turnOffAll(cfg.lights.map { it.lightId })
             br.shutdown()
         }
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
-        virtualDisplay = null; imageReader = null; mediaProjection = null
     }
 
     override fun onDestroy() { stopCapture(); super.onDestroy() }
@@ -302,10 +258,9 @@ class CaptureService : Service() {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CHANNEL_ID, "HueSync TV", NotificationManager.IMPORTANCE_LOW)
+            val ch = NotificationChannel(CHANNEL_ID, "BarkLight", NotificationManager.IMPORTANCE_LOW)
             ch.setShowBadge(false)
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                .createNotificationChannel(ch)
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
         }
     }
 

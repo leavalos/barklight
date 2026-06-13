@@ -3,6 +3,7 @@ package com.huesync.tv.capture
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -10,7 +11,6 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.content.pm.ServiceInfo
 import android.os.*
 import android.util.DisplayMetrics
 import android.util.Log
@@ -21,6 +21,9 @@ import com.huesync.tv.R
 import com.huesync.tv.analyzer.ColorAnalyzer
 import com.huesync.tv.hue.HueBridge
 import com.huesync.tv.model.Config
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 class CaptureService : Service() {
 
@@ -38,8 +41,6 @@ class CaptureService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
-    private var captureThread: Thread? = null
-    private var running = false
     private var config: Config? = null
     private var analyzer: ColorAnalyzer? = null
     private var bridge: HueBridge? = null
@@ -48,29 +49,34 @@ class CaptureService : Service() {
     private var screenDpi = 0
     private var blackFrameCount = 0
     private var inDrmMode = false
+    private var running = false
+
+    // Scheduler de baja prioridad — dispara la captura N veces por segundo
+    private val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "HueSyncScheduler").also {
+            it.priority = Thread.MIN_PRIORITY  // mínima prioridad del sistema
+        }
+    }
+    private var scheduledTask: ScheduledFuture<*>? = null
+
+    // Flag para evitar capturas superpuestas
+    @Volatile private var capturing = false
 
     override fun onCreate() {
         super.onCreate()
-        Log.e(TAG, "onCreate llamado")
         createChannel()
-        // startForeground inmediatamente en onCreate con tipo mediaProjection
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIF_ID, buildNotif("HueSync TV activo"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
             startForeground(NOTIF_ID, buildNotif("HueSync TV activo"))
         }
-        Log.e(TAG, "startForeground llamado en onCreate")
+        Log.d(TAG, "onCreate")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.e(TAG, "onStartCommand llamado action=${intent?.action}")
-
         if (intent?.action == ACTION_STOP) {
-            Log.e(TAG, "Deteniendo servicio")
-            stopCapture()
-            stopSelf()
-            return START_NOT_STICKY
+            stopCapture(); stopSelf(); return START_NOT_STICKY
         }
 
         try {
@@ -90,34 +96,27 @@ class CaptureService : Service() {
             else
                 intent?.getParcelableExtra(EXTRA_RESULT_DATA)
 
-            Log.e(TAG, "resultCode=$resultCode resultData=$resultData")
-
-            // RESULT_OK = -1 en Android, RESULT_CANCELED = 0
             if (resultCode == 0 || resultData == null) {
-                Log.e(TAG, "Sin datos de proyeccion validos resultCode=$resultCode")
-                stopSelf()
-                return START_NOT_STICKY
+                Log.e(TAG, "Sin datos de proyeccion"); stopSelf(); return START_NOT_STICKY
             }
 
             isRunning = true
-            updateNotif("Conectando Entertainment API...")
+            running   = true
             initScreen()
             initProjection(resultCode, resultData)
 
-            // Iniciar Entertainment API (DTLS/UDP) si está configurada
             bridge!!.startEntertainment { ok ->
-                runOnMainThread {
-                    if (ok) updateNotif("Sincronizando (Entertainment API)")
-                    else    updateNotif("Capturando pantalla (HTTP)")
+                Handler(Looper.getMainLooper()).post {
+                    updateNotif(if (ok) "Sincronizando (Entertainment API)" else "Sincronizando (HTTP)")
                 }
             }
-            startLoop()
-            Log.e(TAG, "Loop de captura iniciado")
+
+            startScheduler()
+            Log.d(TAG, "Servicio iniciado a ${config!!.hueFps}fps")
         } catch (e: Exception) {
-            Log.e(TAG, "Error en onStartCommand: ${e.message}", e)
+            Log.e(TAG, "Error iniciando: ${e.message}", e)
             stopSelf()
         }
-
         return START_STICKY
     }
 
@@ -132,114 +131,135 @@ class CaptureService : Service() {
             @Suppress("DEPRECATION") wm.defaultDisplay.getMetrics(m)
             screenW = m.widthPixels; screenH = m.heightPixels; screenDpi = m.densityDpi
         }
-        // 120px suficiente con muestreo directo por zona, mínima carga al decoder
         if (screenW > 120) {
             val s = 120f / screenW
             screenW = 120; screenH = (screenH * s).toInt()
         }
-        Log.e(TAG, "Resolucion captura: ${screenW}x${screenH}")
+        Log.d(TAG, "Resolucion captura: ${screenW}x${screenH}")
     }
 
     private fun initProjection(resultCode: Int, data: Intent) {
         val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = pm.getMediaProjection(resultCode, data)
 
-        // Android 14+ requiere registrar un callback ANTES de createVirtualDisplay
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             mediaProjection!!.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    Log.e(TAG, "MediaProjection detenida por el sistema")
-                    stopCapture()
-                    stopSelf()
-                }
+                override fun onStop() { stopCapture(); stopSelf() }
             }, Handler(Looper.getMainLooper()))
         }
 
+        // maxImages=1: solo un frame en memoria a la vez
+        // No conectamos al VirtualDisplay todavía — lo haremos on-demand
         imageReader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 1)
+
+        // CLAVE: FLAG_AUTO_MIRROR pero SIN surface activa al inicio
+        // El VirtualDisplay existe pero no renderiza nada hasta que conectemos la surface
         virtualDisplay = mediaProjection!!.createVirtualDisplay(
-            "HueSyncCapture", screenW, screenH, screenDpi,
+            "BarkLightCapture", screenW, screenH, screenDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface, null, null
+            null,  // surface null = VirtualDisplay inactivo, NO consume GPU
+            null, null
         )
-        Log.e(TAG, "VirtualDisplay creado")
+        Log.d(TAG, "VirtualDisplay creado (inactivo)")
     }
 
-    private fun startLoop() {
-        running = true
-        val cfg = config!!
-        val hueMs   = 1000L / cfg.hueFps
-        val lightIds = cfg.lights.map { it.lightId }
+    /**
+     * Scheduler de captura on-demand.
+     *
+     * En vez de tener el VirtualDisplay renderizando continuamente,
+     * lo activamos solo el tiempo necesario para capturar un frame,
+     * luego lo desactivamos inmediatamente.
+     *
+     * Esto libera la GPU entre capturas, permitiendo que el decoder
+     * de video funcione sin competencia.
+     */
+    private fun startScheduler() {
+        val intervalMs = 1000L / (config?.hueFps ?: 8)
 
-        captureThread = Thread {
-            // Prioridad baja para no competir con el reproductor de video
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST)
+        scheduledTask = scheduler.scheduleAtFixedRate({
+            if (!running || capturing) return@scheduleAtFixedRate
 
-            var lastHueSend = 0L
-            Log.e(TAG, "Loop iniciado hueMs=$hueMs")
+            capturing = true
+            try {
+                captureOnce()
+            } finally {
+                capturing = false
+            }
+        }, 500, intervalMs, TimeUnit.MILLISECONDS)
+    }
 
-            while (running) {
-                val now = SystemClock.elapsedRealtime()
+    private fun captureOnce() {
+        val reader = imageReader ?: return
+        val vd     = virtualDisplay ?: return
 
-                // Solo procesar si ya es hora de enviar a Hue — no desperdiciar CPU en otros frames
-                if (now - lastHueSend < hueMs) {
-                    // Descartar frames intermedios sin procesarlos
-                    imageReader?.acquireLatestImage()?.close()
-                    Thread.sleep(16) // ~60fps max, dejamos aire al decoder
-                    continue
-                }
+        // 1. Conectar surface al VirtualDisplay — Android empieza a renderizar
+        vd.surface = reader.surface
 
-                val image = imageReader?.acquireLatestImage()
-                if (image != null) {
-                    try {
-                        val plane  = image.planes[0]
-                        val rowPad = plane.rowStride - plane.pixelStride * screenW
-                        val bmp = Bitmap.createBitmap(
-                            screenW + rowPad / plane.pixelStride,
-                            screenH, Bitmap.Config.ARGB_8888)
-                        bmp.copyPixelsFromBuffer(plane.buffer)
-                        image.close()
+        // 2. Pequeño sleep para dar tiempo a que llegue el primer frame
+        //    125ms es el tiempo de un frame a 8fps — suficiente
+        Thread.sleep(80)
 
-                        val frame = if (rowPad > 0)
-                            Bitmap.createBitmap(bmp, 0, 0, screenW, screenH).also { bmp.recycle() }
-                        else bmp
+        // 3. Leer el frame disponible
+        val image = reader.acquireLatestImage()
 
-                        val isBlack = isFrameBlack(frame)
-                        if (isBlack) {
-                            blackFrameCount++
-                            if (blackFrameCount >= 30 && !inDrmMode) {
-                                inDrmMode = true
-                                bridge?.setDrmMode(true, lightIds)
-                                updateNotif("Contenido DRM - luz calida")
-                            }
-                        } else {
-                            if (inDrmMode) {
-                                blackFrameCount = (blackFrameCount - 1).coerceAtLeast(0)
-                                if (blackFrameCount == 0) {
-                                    inDrmMode = false
-                                    bridge?.setDrmMode(false, lightIds)
-                                    updateNotif("Sincronizando pantalla")
-                                }
-                            } else {
-                                blackFrameCount = 0
-                            }
-                        }
+        // 4. INMEDIATAMENTE desconectar — el VirtualDisplay deja de renderizar
+        vd.surface = null
 
-                        if (!inDrmMode) {
-                            val colors = analyzer!!.analyze(frame)
-                            bridge?.setLights(colors)
-                            lastHueSend = SystemClock.elapsedRealtime()
-                        }
-                        frame.recycle()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error procesando frame: ${e.message}")
-                        image.close()
-                    }
-                } else {
-                    Thread.sleep(16)
+        if (image == null) return
+
+        try {
+            val plane  = image.planes[0]
+            val rowPad = plane.rowStride - plane.pixelStride * screenW
+            val bmp = Bitmap.createBitmap(
+                screenW + rowPad / plane.pixelStride,
+                screenH, Bitmap.Config.ARGB_8888)
+            bmp.copyPixelsFromBuffer(plane.buffer)
+            image.close()
+
+            val frame = if (rowPad > 0)
+                Bitmap.createBitmap(bmp, 0, 0, screenW, screenH).also { bmp.recycle() }
+            else bmp
+
+            processFrame(frame)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error procesando frame: ${e.message}")
+            try { image.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun processFrame(frame: Bitmap) {
+        val lightIds = config?.lights?.map { it.lightId } ?: return
+
+        val isBlack = isFrameBlack(frame)
+        if (isBlack) {
+            blackFrameCount++
+            if (blackFrameCount >= 30 && !inDrmMode) {
+                inDrmMode = true
+                bridge?.setDrmMode(true, lightIds)
+                Handler(Looper.getMainLooper()).post {
+                    updateNotif("Contenido DRM - luz calida")
                 }
             }
-            Log.e(TAG, "Loop terminado")
-        }.also { it.name = "HueSyncLoop"; it.start() }
+        } else {
+            if (inDrmMode) {
+                blackFrameCount = (blackFrameCount - 1).coerceAtLeast(0)
+                if (blackFrameCount == 0) {
+                    inDrmMode = false
+                    bridge?.setDrmMode(false, lightIds)
+                    Handler(Looper.getMainLooper()).post {
+                        updateNotif("Sincronizando pantalla")
+                    }
+                }
+            } else {
+                blackFrameCount = 0
+            }
+        }
+
+        if (!inDrmMode) {
+            val colors = analyzer!!.analyze(frame)
+            bridge?.setLights(colors)
+        }
+        frame.recycle()
     }
 
     private fun isFrameBlack(bmp: Bitmap): Boolean {
@@ -260,15 +280,13 @@ class CaptureService : Service() {
         return samples > 0 && (total / samples / 3) < 8
     }
 
-    private fun runOnMainThread(action: () -> Unit) {
-        android.os.Handler(mainLooper).post(action)
-    }
-
     private fun stopCapture() {
         running = false; isRunning = false
-        captureThread?.interrupt()
-        val cfg = config
-        val br  = bridge
+        scheduledTask?.cancel(true)
+        scheduler.shutdown()
+        // Desconectar surface antes de liberar
+        virtualDisplay?.surface = null
+        val cfg = config; val br = bridge
         if (cfg != null && br != null) {
             br.turnOffAll(cfg.lights.map { it.lightId })
             br.shutdown()
@@ -279,12 +297,7 @@ class CaptureService : Service() {
         virtualDisplay = null; imageReader = null; mediaProjection = null
     }
 
-    override fun onDestroy() {
-        Log.e(TAG, "onDestroy")
-        stopCapture()
-        super.onDestroy()
-    }
-
+    override fun onDestroy() { stopCapture(); super.onDestroy() }
     override fun onBind(intent: Intent?) = null
 
     private fun createChannel() {
@@ -304,7 +317,7 @@ class CaptureService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("HueSync TV")
+            .setContentTitle("BarkLight")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_sync)
             .setContentIntent(openPi)

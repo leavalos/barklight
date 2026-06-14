@@ -40,6 +40,32 @@ public class BarkLightServer {
         System.out.println("[BarkLight] Iniciando - resolucion " + CAPTURE_W + "x" + CAPTURE_H);
         System.out.println("[BarkLight] Android version: " + android.os.Build.VERSION.SDK_INT);
 
+        // Diagnostico: listar todos los metodos estaticos de SurfaceControl
+        // relacionados con captura/display para encontrar la API real del dispositivo
+        try {
+            Class<?> sc = Class.forName("android.view.SurfaceControl");
+            System.out.println("[BarkLight] === Metodos de SurfaceControl (static) ===");
+            for (Method m : sc.getDeclaredMethods()) {
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                    String name = m.getName().toLowerCase();
+                    if (name.contains("display") || name.contains("screenshot") || name.contains("capture")) {
+                        StringBuilder params = new StringBuilder();
+                        for (Class<?> p : m.getParameterTypes()) {
+                            params.append(p.getSimpleName()).append(",");
+                        }
+                        System.out.println("[BarkLight]   " + m.getReturnType().getSimpleName()
+                            + " " + m.getName() + "(" + params + ")");
+                    }
+                }
+            }
+            System.out.println("[BarkLight] === Clases internas de SurfaceControl ===");
+            for (Class<?> inner : sc.getDeclaredClasses()) {
+                System.out.println("[BarkLight]   " + inner.getName());
+            }
+        } catch (Exception e) {
+            System.err.println("[BarkLight] Error listando SurfaceControl: " + e);
+        }
+
         if (!detectStrategy()) {
             System.err.println("[BarkLight] ERROR: Ninguna estrategia de SurfaceControl funciono.");
         } else {

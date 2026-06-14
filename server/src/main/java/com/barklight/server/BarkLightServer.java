@@ -5,6 +5,7 @@ import android.os.IBinder;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -15,13 +16,15 @@ import java.net.Socket;
  * Uso:
  *   adb push barklight-server.jar /data/local/tmp/
  *   adb shell CLASSPATH=/data/local/tmp/barklight-server.jar \
- *             app_process / com.barklight.server.BarkLightServer
+ *             app_process32 / com.barklight.server.BarkLightServer
  *
  * Escucha en :7070. BarkLight APK conecta y pide frames bajo demanda.
  *
- * Usa SurfaceControl.screenshot() via reflexion — el metodo exacto varia
- * segun la version de Android, por eso probamos varias estrategias en orden,
- * igual que hace scrcpy internamente.
+ * Estrategias de captura (en orden de prueba):
+ *  - Android 11+ (API 30+): SurfaceControl.captureDisplay(DisplayCaptureArgs)
+ *    -> ScreenshotHardwareBuffer -> Bitmap.wrapHardwareBuffer()
+ *  - Android <11: getBuiltInDisplay(int) + screenshot(IBinder, int, int)
+ *  - Android <10: screenshot(Rect, int, int, boolean)
  */
 public class BarkLightServer {
 
@@ -85,24 +88,40 @@ public class BarkLightServer {
         t.start();
     }
 
-    // Estrategia 1 (API 29+): getPhysicalDisplayIds() + getPhysicalDisplayToken(long)
-    // Estrategia 2 (API <30): getBuiltInDisplay(int)
+    // ── DETECCION DE ESTRATEGIA ───────────────────────────────────────────────
+
     private static boolean detectStrategy() {
         try {
             Class<?> sc = Class.forName("android.view.SurfaceControl");
 
+            // Estrategia 3 (API 30+): getInternalDisplayToken() + captureDisplay()
+            try {
+                Method getToken = sc.getDeclaredMethod("getInternalDisplayToken");
+                getToken.setAccessible(true);
+                Object token = getToken.invoke(null);
+                if (token != null) {
+                    cachedDisplayToken = token;
+                    strategy = 3;
+                    System.out.println("[BarkLight] getInternalDisplayToken disponible");
+                    return true;
+                }
+            } catch (Exception e) {
+                System.out.println("[BarkLight] Estrategia 3 no disponible: " + e);
+            }
+
+            // Estrategia 1 (API 29): getPhysicalDisplayIds / getPhysicalDisplayToken
             try {
                 Method getIds = sc.getDeclaredMethod("getPhysicalDisplayIds");
                 getIds.setAccessible(true);
                 long[] ids = (long[]) getIds.invoke(null);
                 if (ids != null && ids.length > 0) {
-                    Method getToken = sc.getDeclaredMethod("getPhysicalDisplayToken", long.class);
-                    getToken.setAccessible(true);
-                    Object token = getToken.invoke(null, ids[0]);
+                    Method getTok = sc.getDeclaredMethod("getPhysicalDisplayToken", long.class);
+                    getTok.setAccessible(true);
+                    Object token = getTok.invoke(null, ids[0]);
                     if (token != null) {
                         cachedDisplayToken = token;
                         strategy = 1;
-                        System.out.println("[BarkLight] getPhysicalDisplayIds/Token disponible. ids=" + ids.length);
+                        System.out.println("[BarkLight] getPhysicalDisplayIds/Token disponible");
                         return true;
                     }
                 }
@@ -110,6 +129,7 @@ public class BarkLightServer {
                 System.out.println("[BarkLight] Estrategia 1 no disponible: " + e);
             }
 
+            // Estrategia 2 (API <29): getBuiltInDisplay(0)
             try {
                 Method getBuiltIn = sc.getDeclaredMethod("getBuiltInDisplay", int.class);
                 getBuiltIn.setAccessible(true);
@@ -133,7 +153,7 @@ public class BarkLightServer {
     private static byte[] captureFrame() {
         if (strategy == -1 || cachedDisplayToken == null) return null;
         try {
-            Bitmap bmp = tryScreenshot();
+            Bitmap bmp = (strategy == 3) ? captureDisplayApi30() : tryScreenshotLegacy();
             if (bmp == null) return null;
 
             java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
@@ -142,15 +162,91 @@ public class BarkLightServer {
             return baos.toByteArray();
         } catch (Exception e) {
             System.err.println("[BarkLight] Error en captureFrame: " + e);
+            e.printStackTrace();
             return null;
         }
     }
 
-    private static Bitmap tryScreenshot() throws Exception {
+    /**
+     * Android 11+ (API 30): SurfaceControl.captureDisplay(DisplayCaptureArgs)
+     *
+     * Equivalente Java:
+     *   IBinder token = SurfaceControl.getInternalDisplayToken();
+     *   SurfaceControl.DisplayCaptureArgs.Builder b =
+     *       new SurfaceControl.DisplayCaptureArgs.Builder(token);
+     *   b.setSize(CAPTURE_W, CAPTURE_H);
+     *   SurfaceControl.ScreenshotHardwareBuffer shb =
+     *       SurfaceControl.captureDisplay(b.build());
+     *   Bitmap bmp = Bitmap.wrapHardwareBuffer(shb.getHardwareBuffer(), shb.getColorSpace());
+     */
+    private static Bitmap captureDisplayApi30() throws Exception {
+        Class<?> scClass = Class.forName("android.view.SurfaceControl");
+        Class<?> argsClass = Class.forName("android.view.SurfaceControl$DisplayCaptureArgs");
+        Class<?> builderClass = Class.forName("android.view.SurfaceControl$DisplayCaptureArgs$Builder");
+        Class<?> shbClass = Class.forName("android.view.SurfaceControl$ScreenshotHardwareBuffer");
+
+        // new Builder(IBinder displayToken)
+        Constructor<?> builderCtor = builderClass.getDeclaredConstructor(IBinder.class);
+        builderCtor.setAccessible(true);
+        Object builder = builderCtor.newInstance((IBinder) cachedDisplayToken);
+
+        // builder.setSize(width, height) — puede no existir en todas las versiones
+        try {
+            Method setSize = builderClass.getDeclaredMethod("setSize", int.class, int.class);
+            setSize.setAccessible(true);
+            setSize.invoke(builder, CAPTURE_W, CAPTURE_H);
+        } catch (NoSuchMethodException e) {
+            System.out.println("[BarkLight] setSize no disponible, usando tamaño nativo");
+        }
+
+        // DisplayCaptureArgs args = builder.build()
+        Method build = builderClass.getDeclaredMethod("build");
+        build.setAccessible(true);
+        Object args = build.invoke(builder);
+
+        // ScreenshotHardwareBuffer shb = SurfaceControl.captureDisplay(args)
+        Method captureDisplay = scClass.getDeclaredMethod("captureDisplay", argsClass);
+        captureDisplay.setAccessible(true);
+        Object shb = captureDisplay.invoke(null, args);
+
+        if (shb == null) {
+            System.err.println("[BarkLight] captureDisplay devolvio null");
+            return null;
+        }
+
+        // HardwareBuffer hb = shb.getHardwareBuffer()
+        Method getHwBuffer = shbClass.getDeclaredMethod("getHardwareBuffer");
+        getHwBuffer.setAccessible(true);
+        Object hwBuffer = getHwBuffer.invoke(shb);
+
+        // ColorSpace cs = shb.getColorSpace()
+        Object colorSpace = null;
+        try {
+            Method getCs = shbClass.getDeclaredMethod("getColorSpace");
+            getCs.setAccessible(true);
+            colorSpace = getCs.invoke(shb);
+        } catch (Exception ignored) { }
+
+        // Bitmap bmp = Bitmap.wrapHardwareBuffer(hwBuffer, colorSpace)
+        Class<?> hwBufferClass = Class.forName("android.hardware.HardwareBuffer");
+        Class<?> colorSpaceClass = Class.forName("android.graphics.ColorSpace");
+        Method wrapHwBuffer = Bitmap.class.getDeclaredMethod("wrapHardwareBuffer", hwBufferClass, colorSpaceClass);
+        wrapHwBuffer.setAccessible(true);
+        Object bmpObj = wrapHwBuffer.invoke(null, hwBuffer, colorSpace);
+
+        if (bmpObj == null) return null;
+
+        // Copiar a un bitmap software (ARGB_8888) para poder comprimir a JPEG
+        Bitmap hwBmp = (Bitmap) bmpObj;
+        Bitmap swBmp = hwBmp.copy(Bitmap.Config.ARGB_8888, false);
+        hwBmp.recycle();
+        return swBmp;
+    }
+
+    private static Bitmap tryScreenshotLegacy() throws Exception {
         Class<?> sc = Class.forName("android.view.SurfaceControl");
         IBinder token = (IBinder) cachedDisplayToken;
 
-        // Firma A (API 29-30): screenshot(IBinder, int width, int height)
         try {
             Method m = sc.getDeclaredMethod("screenshot", IBinder.class, int.class, int.class);
             m.setAccessible(true);
@@ -161,7 +257,6 @@ public class BarkLightServer {
             System.err.println("[BarkLight] Firma A fallo: " + e);
         }
 
-        // Firma B (API <29): screenshot(Rect, int, int, boolean)
         try {
             Method m = sc.getDeclaredMethod("screenshot",
                 android.graphics.Rect.class, int.class, int.class, boolean.class);
@@ -171,18 +266,6 @@ public class BarkLightServer {
         } catch (NoSuchMethodException ignored) {
         } catch (Exception e) {
             System.err.println("[BarkLight] Firma B fallo: " + e);
-        }
-
-        // Firma C: screenshot(IBinder, Rect, int, int, boolean, int)
-        try {
-            Method m = sc.getDeclaredMethod("screenshot",
-                IBinder.class, android.graphics.Rect.class, int.class, int.class, boolean.class, int.class);
-            m.setAccessible(true);
-            Object result = m.invoke(null, token, new android.graphics.Rect(), CAPTURE_W, CAPTURE_H, false, 0);
-            if (result instanceof Bitmap) return (Bitmap) result;
-        } catch (NoSuchMethodException ignored) {
-        } catch (Exception e) {
-            System.err.println("[BarkLight] Firma C fallo: " + e);
         }
 
         return null;

@@ -34,7 +34,7 @@ echo "[3/4] Copiando JAR al TV..."
 adb $ADB_TARGET push "$JAR_PATH" "$REMOTE_PATH"
 
 echo "[4/4] Iniciando servidor en background..."
-adb $ADB_TARGET shell "CLASSPATH=$REMOTE_PATH nohup app_process / com.barklight.server.BarkLightServer > $LOG_PATH 2>&1 &"
+adb $ADB_TARGET shell "CLASSPATH=$REMOTE_PATH nohup app_process32 / com.barklight.server.BarkLightServer > $LOG_PATH 2>&1 &"
 
 sleep 2
 
